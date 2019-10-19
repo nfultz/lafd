@@ -1,0 +1,142 @@
+---
+title: "FDLA Analysis"
+author: "Neal Fultz"
+date: "10/17/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(lafd)
+```
+
+
+
+```{r}
+incidents %>% 
+  group_by(Quarter=yyyy:qq) %>% 
+  summarise(Freq=n()) %>% 
+  ggplot() + aes(x=Quarter, y=Freq) + geom_col()
+```
+
+
+```{r}
+table(home=incidents$HOME_BATTALION, 
+      incident=incidents$INCIDENT_BATTALION_NBR)[,-c(1:6,8, 10, 14)] %>% 
+  knitr::kable()
+
+```
+
+```{r}
+df <- incidents %>% 
+  filter(battalion_to_analyze & 
+         is.finite(secs_pickup) & 
+         secs_pickup > 30 & secs_pickup < 60*60 &
+         !duplicated(RANDOMIZED_INCIDENT_NBR))
+
+m <- glmer(secs_pickup ~ 
+             dispatch_match(INCIDENT_FIRST_IN_DISTRICT, HOME_STATION) +
+             sincos(ssm_enroute, prod(60,60,24,1/2/pi)) +
+             yyyy+qq+dow + emergency_dispatch +
+           (1  | INCIDENT_FIRST_IN_DISTRICT/HOME_STATION), 
+           data=df[1:1000,], 
+           family=Gamma(link="log"))
+
+pars <- getME(m, c("theta","fixef"))
+
+m.1 <- m
+results <- as.list(1:13)
+
+for(j in 1:2) {
+for(i in 1:13) {
+  message("\n\n*** ", i," ",j, "\t", Sys.time(),"\n")
+  m.1 <- update(m.1, start=pars, data=df, weights = fold != i)
+  results[[i]] <- m.1
+  pars <- getME(m.1, c("theta","fixef"))
+}
+}
+
+saveRDS(results, "~/results.RDS")
+```
+
+
+
+
+
+```{r}
+g = Gamma()
+curve(g$linkinv(x), from=-5, to=5, ylab=expression(g^-1*(eta)), xlab=expression(eta))
+```
+
+```{r}
+# trained with buggy version of sincos
+# for(i in 1:13) attr(attr(results[[i]]@frame, "terms"), "predvars.fixed")[[4]][[3]] <- NULL
+```
+
+```{r}
+stations = levels(droplevels(df$INCIDENT_FIRST_IN_DISTRICT))
+yhat = df$secs_pickup * 0
+ytilde = matrix(0, length(yhat), length(stations))
+colnames(ytilde) <- stations
+
+for(i in 1:13) { # folds
+  message(i, "\n")
+  idx <- df$fold == i
+  yhat[idx] <-  predict(results[[i]], df[idx,], re.form=NULL, type="response", allow.new.levels=TRUE)
+
+  for(j in stations) {
+    message("  ", j, "\n")
+    newdata <- df[idx,]
+    newdata[(newdata$flip) &  (newdata$INCIDENT_FIRST_IN_DISTRICT %in% j), "HOME_STATION"] <- j
+    ytilde[idx, j] = predict(results[[i]], newdata, re.form=NULL, type="response", allow.new.levels=TRUE)
+  }
+}
+
+ytilde[is.na(ytilde)] <- yhat[row(ytilde)[is.na(ytilde)]]
+
+
+```
+
+```{r}
+
+  out <- NULL
+
+  stations <- intersect( 
+    levels(droplevels(df$INCIDENT_FIRST_IN_DISTRICT)),
+    levels(droplevels(df$HOME_STATION))
+  )
+  
+  
+  for(j in stations) {
+    flip = df$flip & (df$INCIDENT_FIRST_IN_DISTRICT %in% j) & df$borrowed
+    self <- df$HOME_STATION %in% j
+    other <- df$HOME_STATION %in% unique(df$HOME_STATION[flip])
+    
+    changed = sum(flip)
+    ATE <- mean(yhat - ytilde[, j])
+    ATT <- mean(yhat[flip] - ytilde[flip, j])
+    Dir <- mean(yhat[self]) - mean(ytilde[self | flip, j])
+    Cross <- mean(yhat[other]) - mean(ytilde[other & !flip, j])
+    out <- rbind(out, data.frame(station = j, changed, ATE, ATT, Dir, Cross, stringsAsFactors = FALSE), stringsAsFactors=FALSE)
+  }
+  
+  
+out$station <- factor(out$station, as.character(sort(as.integer(unique(out$station))))  )
+  
+```
+
+
+```{r}
+ggplot(out) + aes(station, changed) + geom_col() + xlab("Station") + ylab("Utilization")
+
+
+ggplot(out) + aes(x=changed, y=ATT, label=station) + 
+  geom_line(color="green", linetype="dashed", size=1, 
+            data=
+              out %>% arrange(-ATT, -changed) %>% filter(changed == cummax(changed))
+              
+              ) + geom_label() +xlab("Utilization")
+
+ggplot(out) + aes(x=Cross, y=Dir, label=station)+geom_label()
+
+```

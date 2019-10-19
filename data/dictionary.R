@@ -1,6 +1,0 @@
-tmp <- tempfile()
-system(sprintf("unrar p -inul 'Data Angels.rar' 'Data Dictionary.xlsx' > %s", tmp))
-dictionary_incident <- readxl::read_xlsx(tmp, "Incident Ref")
-dictionary_main <- readxl::read_xlsx(tmp, "Main Data")
-unlink(tmp)
-rm(tmp)
